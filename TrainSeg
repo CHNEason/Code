@@ -1,0 +1,118 @@
+# -*- coding: utf-8 -*-
+from __future__ import division
+from __future__ import print_function
+from __future__ import absolute_import
+
+import random
+import os
+from time import time
+import numpy as np
+import torch
+import torch.utils.data as data
+from tqdm import tqdm
+from networks.dinknet import DinkNet34
+# from networks.model_Mine import Discriminator, Generator
+from framework import MyFrame
+from loss import dice_bce_loss, IoU2
+from data import TrainFolder, ValFolder
+# import image_utils
+os.environ['CUDA_VISIBLE_DEVICES'] = "0"
+# 定义超参数，图像大小，图像路径
+import Constants
+
+
+def CE_Net_Train():
+    NAME = 'First_Dense_G5_Skip-AdaN'
+    solver = MyFrame(DinkNet34, dice_bce_loss, 0.0002)
+    batchsize = torch.cuda.device_count() * Constants.BATCHSIZE_PER_CARD
+
+    #############修改自己的数据集地址#############
+    Trainset = TrainFolder(root_path=Constants.ROOT, datasets='Road', mode='train')
+    train_loader = torch.utils.data.DataLoader(
+        Trainset,
+        batch_size=batchsize,
+        shuffle=True, num_workers=2, pin_memory=True)
+    Valset = ValFolder(root_path=Constants.ROOT, datasets='Road', mode='val')
+    val_loader = torch.utils.data.DataLoader(
+        Valset,
+        batch_size=1,
+        shuffle=False, num_workers=2, pin_memory=True)
+    # start the logging files
+    mylog = open('logs/' + NAME + '.log', 'a')
+    print('TrainSet:', os.path.dirname(Trainset.images[0]), file=mylog)   # # 在日志中写入训练集列表
+    mylog.flush()
+    tic = time()
+    no_optim = 0
+    total_epoch = Constants.TOTAL_EPOCH
+    train_epoch_best_loss = Constants.INITAL_EPOCH_LOSS
+    for epoch in range(1, total_epoch + 1):
+        train_loader_iter = iter(train_loader)
+        val_data_iter = iter(val_loader)
+        train_epoch_loss = 0
+        index = 0
+        for i, (img, mask) in tqdm(enumerate(train_loader_iter), total=len(train_loader_iter)):
+            solver.set_input(img, mask)
+            train_loss, pred = solver.optimize()
+            train_epoch_loss += train_loss
+            index = index + 1
+        iou_now = 0
+        with torch.no_grad():
+            for img1, mask1 in tqdm(val_data_iter, total=len(val_data_iter)):
+                solver.net.eval()
+                IoU = IoU2()
+                pred1 = solver.net(img1.cuda())
+                iou_now += IoU(mask1.cuda(), pred1)
+
+        iou = iou_now/len(val_data_iter)
+        # 将信息保存在log文件夹中
+        print('********', file=mylog)
+        print('epoch:', epoch, '    time:', int(time() - tic), file=mylog)
+        print('train_loss:', train_epoch_loss/len(train_loader_iter), file=mylog)
+        print('SHAPE:', Constants.Image_size, file=mylog)
+        print('********')
+        print('epoch:', epoch, '    time:', int(time() - tic))
+        print('train_loss:', train_epoch_loss/len(train_loader_iter))
+        print('SHAPE:', Constants.Image_size)
+        print('IoU:', iou)
+        print('IoU:', iou, file=mylog)
+
+        if train_epoch_loss >= train_epoch_best_loss:
+            no_optim += 1
+        else:
+            no_optim = 0
+            train_epoch_best_loss = train_epoch_loss
+            solver.save('./weights/' + NAME + '.pth')
+        if no_optim > Constants.NUM_EARLY_STOP:
+            print('early stop at %d epoch' % epoch, file=mylog)
+            print('early stop at %d epoch' % epoch)
+            solver.load('./weights/' + NAME + '.pth')
+            solver.save('./weights/' + NAME + '.pth', mode='NoOp')
+            break
+        if no_optim > Constants.NUM_UPDATE_LR:
+            if solver.old_lr < 5e-7:
+                solver.load('./weights/' + NAME + '.pth')
+                solver.save('./weights/' + NAME + '.pth', mode='NoOp')
+                break
+            solver.load('./weights/' + NAME + '.pth')
+            solver.update_lr(5.0, factor=True, mylog=mylog)
+        mylog.flush()
+
+        print('lr:', solver.old_lr, 'no_optim:', no_optim)
+        print('lr:', solver.old_lr, 'no_optim:', no_optim, file=mylog)
+
+    print('Finish!', file=mylog)
+    print('Finish!')
+    mylog.close()
+
+
+if __name__ == '__main__':
+    torch.manual_seed(8)  # 为CPU设置随机种子
+    torch.cuda.manual_seed(8)  # 为当前GPU设置随机种子
+    np.random.seed(8)  # Numpy module.
+    random.seed(8)  # Python random module.
+    print(torch.__version__)
+    CE_Net_Train()
+
+
+
+
